@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ask for an Ollama key, install or update Claude Code, and copy the Cursor hook.
+# Project Mummy. Name the project, pick an API that is not a Claude account, install Claude Code.
 set -euo pipefail
 
 HOME_PATH="${HOME_PATH:-$HOME}"
@@ -31,92 +31,34 @@ if len(token) >= 8:
 '
 }
 
-key_ok() {
-  OLLAMA_KEY_CHECK="$1" python3 -c '
-import os, urllib.request
-key = os.environ.get("OLLAMA_KEY_CHECK") or ""
-req = urllib.request.Request(
-    "https://ollama.com/api/tags",
-    headers={"Authorization": "Bearer " + key},
-)
-try:
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        raise SystemExit(0 if resp.status == 200 else 1)
-except Exception:
-    raise SystemExit(1)
-'
-}
-
-prompt_key() {
-  local saved envkey typed
-  saved=$(saved_key || true)
-  envkey="${OLLAMA_KEY:-${OLLAMA_API_KEY:-}}"
-  echo "" >&2
-  echo "Ollama API key" >&2
-  echo "Create or copy one at https://ollama.com/settings/keys" >&2
-  echo "The key is saved only on this computer. It is not stored in git." >&2
-  if [ -n "$saved" ]; then
-    echo "A key ending in $(key_tail "$saved") is already saved on this computer." >&2
-  fi
-  if [ -n "$envkey" ]; then
-    echo "This terminal already has a key ending in $(key_tail "$envkey")." >&2
-  fi
-  echo "" >&2
-  while true; do
-    if [ -n "$saved" ] || [ -n "$envkey" ]; then
-      echo "Press Enter to keep the saved key, or paste a new key. Input stays hidden." >&2
-    else
-      echo "Paste your Ollama API key. Input stays hidden." >&2
-    fi
-    IFS= read -r -s typed || true
-    echo "" >&2
-    typed=$(printf '%s' "$typed" | tr -d '\r')
-    if [ -z "$typed" ]; then
-      if [ -n "$saved" ]; then
-        printf '%s' "$saved"
-        return
-      fi
-      if [ -n "$envkey" ]; then
-        printf '%s' "$envkey"
-        return
-      fi
-      echo "A key is required." >&2
-      continue
-    fi
-    echo "Checking the key with Ollama..." >&2
-    if key_ok "$typed"; then
-      echo "Key accepted. It ends in $(key_tail "$typed")." >&2
-      printf '%s' "$typed"
-      return
-    fi
-    echo "Ollama rejected that key. Paste it again." >&2
-  done
-}
-
 write_settings() {
-  HOME_PATH="$HOME_PATH" OLLAMA_KEY_CHECK="$1" python3 -c '
+  HOME_PATH="$HOME_PATH" OLLAMA_KEY_CHECK="$1" \
+  MUMMY_BASE="$2" MUMMY_MODEL="$3" MUMMY_FAST="$4" MUMMY_DISCOVER="$5" \
+  python3 -c '
 import json, os
 from pathlib import Path
 home = Path(os.environ["HOME_PATH"])
 dest = home / ".claude"
 dest.mkdir(parents=True, exist_ok=True)
-settings = {
-    "model": "glm-5.3",
-    "env": {
-        "ANTHROPIC_BASE_URL": "https://ollama.com",
-        "ANTHROPIC_AUTH_TOKEN": os.environ["OLLAMA_KEY_CHECK"],
-        "ANTHROPIC_API_KEY": "",
-        "ANTHROPIC_MODEL": "glm-5.3",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.3",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.3",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-5.3-flash",
-        "ANTHROPIC_DEFAULT_FABLE_MODEL": "glm-5.3",
-        "CLAUDE_CODE_SUBAGENT_MODEL": "glm-5.3",
-    },
+model = os.environ["MUMMY_MODEL"]
+fast = os.environ["MUMMY_FAST"]
+env = {
+    "ANTHROPIC_BASE_URL": os.environ["MUMMY_BASE"],
+    "ANTHROPIC_AUTH_TOKEN": os.environ["OLLAMA_KEY_CHECK"],
+    "ANTHROPIC_API_KEY": "",
+    "ANTHROPIC_MODEL": model,
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": fast,
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": model,
+    "CLAUDE_CODE_SUBAGENT_MODEL": model,
 }
+if os.environ.get("MUMMY_DISCOVER") == "1":
+    env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
+settings = {"model": model, "env": env}
 (dest / "settings.json").write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
 '
-  unset OLLAMA_KEY_CHECK
+  unset OLLAMA_KEY_CHECK MUMMY_BASE MUMMY_MODEL MUMMY_FAST MUMMY_DISCOVER
 }
 
 install_hook() {
@@ -127,7 +69,12 @@ install_hook() {
   mkdir -p "$hook_dir" "$template_dir"
   cp "$SCRIPT_DIR/hooks/ensure-claude-setup.sh" "$hook_dir/ensure-claude-setup.sh"
   chmod +x "$hook_dir/ensure-claude-setup.sh"
-  cp "$SCRIPT_DIR/templates/.claude/settings.json" "$template_dir/settings.json"
+  MUMMY_MODEL="$1" MUMMY_TEMPLATE="$template_dir/settings.json" python3 -c '
+import json, os
+from pathlib import Path
+dest = Path(os.environ["MUMMY_TEMPLATE"])
+dest.write_text(json.dumps({"model": os.environ["MUMMY_MODEL"]}) + "\n", encoding="utf-8")
+'
   command="./hooks/ensure-claude-setup.sh"
   HOME_PATH="$HOME_PATH" HOOK_COMMAND="$command" python3 -c '
 import json, os
@@ -221,7 +168,7 @@ rename_project_folder() {
   if mv "$SCRIPT_DIR" "$new_path"; then
     git -C "$new_path" remote remove origin >/dev/null 2>&1 || true
     echo "Renamed the project folder to $new_path" >&2
-    echo "The setup-repo git remote was removed so this project does not push back to it." >&2
+    echo "The Project Mummy git remote was removed so this project does not push back to it." >&2
     printf '%s' "$new_path"
     return
   fi
@@ -247,15 +194,145 @@ install_claude() {
   echo "Claude Code installed. Open a new terminal so claude is on PATH."
 }
 
+prompt_service() {
+  local choice model base fast
+  echo "" >&2
+  echo "API service" >&2
+  echo "Claude Code will use this key. A Claude account is not required." >&2
+  echo "  1  Ollama Cloud     glm-5.3, no Claude account" >&2
+  echo "  2  OpenRouter       your model, OpenRouter credits" >&2
+  echo "  3  Other            any service that speaks the Anthropic Messages API" >&2
+  while true; do
+    echo "Choose 1, 2, or 3:" >&2
+    IFS= read -r choice || true
+    choice=$(printf '%s' "$choice" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [ "$choice" = "1" ]; then
+      printf '%s\n' "Ollama Cloud" "https://ollama.com" "glm-5.3" "glm-5.3-flash" "https://ollama.com/settings/keys" "https://ollama.com/api/tags" "0"
+      return
+    fi
+    if [ "$choice" = "2" ]; then
+      echo "OpenRouter model id (Enter for openrouter/auto):" >&2
+      IFS= read -r model || true
+      model=$(printf '%s' "$model" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      if [ -z "$model" ]; then model="openrouter/auto"; fi
+      printf '%s\n' "OpenRouter" "https://openrouter.ai/api" "$model" "$model" "https://openrouter.ai/settings/keys" "https://openrouter.ai/api/v1/key" "1"
+      return
+    fi
+    if [ "$choice" = "3" ]; then
+      echo "Base URL, including https://:" >&2
+      IFS= read -r base || true
+      base=$(printf '%s' "$base" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s:/*$::')
+      case "$base" in
+        https://*) ;;
+        *) echo "The base URL has to start with https://" >&2; continue ;;
+      esac
+      echo "Model id:" >&2
+      IFS= read -r model || true
+      model=$(printf '%s' "$model" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      if [ -z "$model" ]; then echo "A model id is required." >&2; continue; fi
+      echo "Smaller model for background calls (Enter to reuse $model):" >&2
+      IFS= read -r fast || true
+      fast=$(printf '%s' "$fast" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      if [ -z "$fast" ]; then fast="$model"; fi
+      printf '%s\n' "Custom" "$base" "$model" "$fast" "" "$base" "0"
+      return
+    fi
+    echo "Type 1, 2, or 3." >&2
+  done
+}
+
+key_ok_url() {
+  OLLAMA_KEY_CHECK="$1" MUMMY_CHECK_URL="$2" python3 -c '
+import os, urllib.request
+key = os.environ.get("OLLAMA_KEY_CHECK") or ""
+url = os.environ["MUMMY_CHECK_URL"]
+req = urllib.request.Request(url, headers={"Authorization": "Bearer " + key})
+try:
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raise SystemExit(0 if resp.status == 200 else 1)
+except Exception:
+    raise SystemExit(1)
+'
+}
+
+prompt_service_key() {
+  local name="$1" base="$2" key_url="$3" check_url="$4"
+  local saved saved_base typed allow
+  saved=$(saved_key || true)
+  saved_base=$(HOME_PATH="$HOME_PATH" python3 -c '
+import json, os
+from pathlib import Path
+path = Path(os.environ["HOME_PATH"]) / ".claude" / "settings.json"
+if not path.is_file():
+    raise SystemExit(0)
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+print(str((data.get("env") or {}).get("ANTHROPIC_BASE_URL") or ""))
+')
+  echo "" >&2
+  echo "API key for $name" >&2
+  if [ -n "$key_url" ]; then echo "Create or copy one at $key_url" >&2; fi
+  echo "The key is saved only on this computer. It is not stored in git." >&2
+  if [ -n "$saved" ] && [ "$saved_base" = "$base" ]; then
+    echo "A key ending in $(key_tail "$saved") is already saved for this service." >&2
+  fi
+  echo "" >&2
+  while true; do
+    if [ -n "$saved" ] && [ "$saved_base" = "$base" ]; then
+      echo "Press Enter to keep the saved key, or paste a new key. Input stays hidden." >&2
+    else
+      echo "Paste the API key. Input stays hidden." >&2
+    fi
+    IFS= read -r -s typed || true
+    echo "" >&2
+    typed=$(printf '%s' "$typed" | tr -d '\r')
+    if [ -z "$typed" ]; then
+      if [ -n "$saved" ] && [ "$saved_base" = "$base" ]; then
+        printf '%s' "$saved"
+        return
+      fi
+      echo "A key is required." >&2
+      continue
+    fi
+    echo "Checking the key..." >&2
+    if key_ok_url "$typed" "$check_url"; then
+      echo "Key accepted. It ends in $(key_tail "$typed")." >&2
+      printf '%s' "$typed"
+      return
+    fi
+    if [ "$name" = "Custom" ]; then
+      echo "The check did not succeed. Type yes to save this key anyway:" >&2
+      IFS= read -r allow || true
+      allow=$(printf '%s' "$allow" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      if [ "$allow" = "yes" ]; then
+        printf '%s' "$typed"
+        return
+      fi
+    fi
+    echo "That key was rejected. Paste it again." >&2
+  done
+}
+
 PROJECT_PATH=$(prompt_project_name)
-KEY=$(prompt_key)
-write_settings "$KEY"
+SERVICE_LINES=$(prompt_service)
+SERVICE_NAME=$(printf '%s\n' "$SERVICE_LINES" | sed -n '1p')
+SERVICE_BASE=$(printf '%s\n' "$SERVICE_LINES" | sed -n '2p')
+SERVICE_MODEL=$(printf '%s\n' "$SERVICE_LINES" | sed -n '3p')
+SERVICE_FAST=$(printf '%s\n' "$SERVICE_LINES" | sed -n '4p')
+SERVICE_KEY_URL=$(printf '%s\n' "$SERVICE_LINES" | sed -n '5p')
+SERVICE_CHECK=$(printf '%s\n' "$SERVICE_LINES" | sed -n '6p')
+SERVICE_DISCOVER=$(printf '%s\n' "$SERVICE_LINES" | sed -n '7p')
+KEY=$(prompt_service_key "$SERVICE_NAME" "$SERVICE_BASE" "$SERVICE_KEY_URL" "$SERVICE_CHECK")
+write_settings "$KEY" "$SERVICE_BASE" "$SERVICE_MODEL" "$SERVICE_FAST" "$SERVICE_DISCOVER"
 unset KEY
-install_hook
+install_hook "$SERVICE_MODEL"
 install_claude
 PROJECT_PATH=$(rename_project_folder "$PROJECT_PATH")
 echo ""
-echo "Ready. Claude Code uses glm-5.3 through Ollama Cloud."
+echo "Ready. Project Mummy wrapped this project."
+echo "Claude Code uses $SERVICE_MODEL at $SERVICE_BASE."
 echo "Settings: $HOME_PATH/.claude/settings.json"
 echo "Project folder: $PROJECT_PATH"
 echo "Open a new terminal in that folder, then run: claude"

@@ -1,6 +1,6 @@
 #!/bin/sh
-# Cursor user hook. Copies the model pin into a project .claude folder.
-# The Ollama key is never written here. setup.sh asks for it.
+# Project Mummy hook. Copies the model pin into a project .claude folder.
+# The API key is never written here. setup.sh asks for it.
 input=$(cat)
 if ! command -v python3 >/dev/null 2>&1; then
   printf '%s\n' '{"pluginPaths":[]}'
@@ -48,9 +48,9 @@ if event == "sessionStart":
         except Exception:
             has_key = False
     if has_key:
-        message = "Claude Code on this PC uses Ollama Cloud. The main model is glm-5.3. Background calls use glm-5.3-flash. The API key stays in the user profile .claude settings. Do not print or copy API keys."
+        message = "Project Mummy has set up Claude Code on this PC. The API key stays in the user profile .claude settings. Do not print or copy API keys."
     else:
-        message = "Claude Code has no Ollama key on this PC yet. Tell the user to run setup.ps1 on Windows, or setup.sh on Mac or Linux, from the claude-ollama-setup repo. That script asks for the key in the terminal. Do not ask them to paste the key into chat."
+        message = "Project Mummy has not saved an API key yet. Tell the user to run setup.ps1 on Windows, or setup.sh on Mac or Linux. That script asks for the key in the terminal. Do not ask them to paste the key into chat."
     print(json.dumps({"additional_context": message}))
 else:
     print(json.dumps({"pluginPaths": []}))

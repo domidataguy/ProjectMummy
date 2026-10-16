@@ -1,4 +1,4 @@
-# Ask for an Ollama key, install or update Claude Code, and copy the Cursor hook.
+# Project Mummy. Name the project, pick an API that is not a Claude account, install Claude Code.
 param(
     [string]$TargetHomePath = $env:USERPROFILE
 )
@@ -37,9 +37,23 @@ function Get-KeyTail {
     return "...."
 }
 
-function Test-OllamaKey {
-    param([string]$Key)
-    $request = [System.Net.HttpWebRequest]::Create("https://ollama.com/api/tags")
+function Get-SavedBaseUrl {
+    param([string]$TargetHome)
+    $path = Join-Path $TargetHome ".claude\settings.json"
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    try {
+        $settings = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        $base = [string]$settings.env.ANTHROPIC_BASE_URL
+        if ($base) { return $base }
+    } catch {
+        return $null
+    }
+    return $null
+}
+
+function Test-UrlKey {
+    param([string]$Url, [string]$Key)
+    $request = [System.Net.HttpWebRequest]::Create($Url)
     $request.Method = "GET"
     $request.Timeout = 30000
     $request.Headers.Add("Authorization", "Bearer $Key")
@@ -53,66 +67,130 @@ function Test-OllamaKey {
     }
 }
 
-function Read-OllamaKey {
-    param([string]$TargetHome)
+function Read-Service {
+    Write-Host ""
+    Write-Host "API service"
+    Write-Host "Claude Code will use this key. A Claude account is not required."
+    Write-Host "  1  Ollama Cloud     glm-5.3, no Claude account"
+    Write-Host "  2  OpenRouter       your model, OpenRouter credits"
+    Write-Host "  3  Other            any service that speaks the Anthropic Messages API"
+    while ($true) {
+        $choice = (Read-Host "Choose 1, 2, or 3").Trim()
+        if ($choice -eq "1") {
+            return @{
+                Name = "Ollama Cloud"
+                BaseUrl = "https://ollama.com"
+                Model = "glm-5.3"
+                FastModel = "glm-5.3-flash"
+                KeyUrl = "https://ollama.com/settings/keys"
+                CheckUrl = "https://ollama.com/api/tags"
+                Discover = $false
+            }
+        }
+        if ($choice -eq "2") {
+            $model = (Read-Host "OpenRouter model id (Enter for openrouter/auto)").Trim()
+            if (-not $model) { $model = "openrouter/auto" }
+            return @{
+                Name = "OpenRouter"
+                BaseUrl = "https://openrouter.ai/api"
+                Model = $model
+                FastModel = $model
+                KeyUrl = "https://openrouter.ai/settings/keys"
+                CheckUrl = "https://openrouter.ai/api/v1/key"
+                Discover = $true
+            }
+        }
+        if ($choice -eq "3") {
+            $base = (Read-Host "Base URL, including https://").Trim().TrimEnd("/")
+            if ($base -notmatch '^https://') {
+                Write-Host "The base URL has to start with https://"
+                continue
+            }
+            $model = (Read-Host "Model id").Trim()
+            if (-not $model) {
+                Write-Host "A model id is required."
+                continue
+            }
+            $fast = (Read-Host "Smaller model for background calls (Enter to reuse $model)").Trim()
+            if (-not $fast) { $fast = $model }
+            return @{
+                Name = "Custom"
+                BaseUrl = $base
+                Model = $model
+                FastModel = $fast
+                KeyUrl = ""
+                CheckUrl = $base
+                Discover = $false
+            }
+        }
+        Write-Host "Type 1, 2, or 3."
+    }
+}
+
+function Read-ServiceKey {
+    param([string]$TargetHome, $Service)
     $saved = Get-SavedKey -TargetHome $TargetHome
-    $fromEnv = $env:OLLAMA_KEY
-    if (-not $fromEnv) { $fromEnv = $env:OLLAMA_API_KEY }
+    $savedBase = Get-SavedBaseUrl -TargetHome $TargetHome
+    $sameService = $saved -and $savedBase -eq $Service.BaseUrl
 
     Write-Host ""
-    Write-Host "Ollama API key"
-    Write-Host "Create or copy one at https://ollama.com/settings/keys"
+    Write-Host ("API key for {0}" -f $Service.Name)
+    if ($Service.KeyUrl) { Write-Host ("Create or copy one at {0}" -f $Service.KeyUrl) }
     Write-Host "The key is saved only on this PC. It is not stored in git."
-    if ($saved) {
-        Write-Host ("A key ending in {0} is already saved on this PC." -f (Get-KeyTail $saved))
-    }
-    if ($fromEnv) {
-        Write-Host ("This terminal already has a key ending in {0}." -f (Get-KeyTail $fromEnv))
+    if ($sameService) {
+        Write-Host ("A key ending in {0} is already saved for this service." -f (Get-KeyTail $saved))
     }
     Write-Host ""
 
     while ($true) {
-        if ($saved -or $fromEnv) {
+        if ($sameService) {
             Write-Host "Press Enter to keep the saved key, or paste a new key. Input stays hidden."
         } else {
-            Write-Host "Paste your Ollama API key. Input stays hidden."
+            Write-Host "Paste the API key. Input stays hidden."
         }
         $typed = Convert-SecureStringToText (Read-Host -AsSecureString)
         $typed = $typed.Trim()
         if ($typed.Length -eq 0) {
-            if ($saved) { return $saved }
-            if ($fromEnv) { return $fromEnv }
+            if ($sameService) { return $saved }
             Write-Host "A key is required."
             continue
         }
-        Write-Host "Checking the key with Ollama..."
-        if (Test-OllamaKey -Key $typed) {
+        Write-Host "Checking the key..."
+        if (Test-UrlKey -Url $Service.CheckUrl -Key $typed) {
             Write-Host ("Key accepted. It ends in {0}." -f (Get-KeyTail $typed))
             return $typed
         }
-        Write-Host "Ollama rejected that key. Paste it again."
+        if ($Service.Name -eq "Custom") {
+            $allow = (Read-Host "The check did not succeed. Type yes to save this key anyway").Trim()
+            if ($allow -eq "yes") { return $typed }
+        }
+        Write-Host "That key was rejected. Paste it again."
     }
 }
 
 function Write-ClaudeSettings {
-    param([string]$TargetHome, [string]$Key)
+    param([string]$TargetHome, [string]$Key, $Service)
     $dir = Join-Path $TargetHome ".claude"
     if (-not (Test-Path -LiteralPath $dir)) {
         New-Item -ItemType Directory -Path $dir | Out-Null
     }
+    $envMap = @{
+        ANTHROPIC_BASE_URL = $Service.BaseUrl
+        ANTHROPIC_AUTH_TOKEN = $Key
+        ANTHROPIC_API_KEY = ""
+        ANTHROPIC_MODEL = $Service.Model
+        ANTHROPIC_DEFAULT_OPUS_MODEL = $Service.Model
+        ANTHROPIC_DEFAULT_SONNET_MODEL = $Service.Model
+        ANTHROPIC_DEFAULT_HAIKU_MODEL = $Service.FastModel
+        ANTHROPIC_DEFAULT_FABLE_MODEL = $Service.Model
+        CLAUDE_CODE_SUBAGENT_MODEL = $Service.Model
+    }
+    if ($Service.Discover) {
+        $envMap["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
+    }
     $settings = @{
-        model = "glm-5.3"
-        env = @{
-            ANTHROPIC_BASE_URL = "https://ollama.com"
-            ANTHROPIC_AUTH_TOKEN = $Key
-            ANTHROPIC_API_KEY = ""
-            ANTHROPIC_MODEL = "glm-5.3"
-            ANTHROPIC_DEFAULT_OPUS_MODEL = "glm-5.3"
-            ANTHROPIC_DEFAULT_SONNET_MODEL = "glm-5.3"
-            ANTHROPIC_DEFAULT_HAIKU_MODEL = "glm-5.3-flash"
-            ANTHROPIC_DEFAULT_FABLE_MODEL = "glm-5.3"
-            CLAUDE_CODE_SUBAGENT_MODEL = "glm-5.3"
-        }
+        model = $Service.Model
+        env = $envMap
     }
     Add-Type -AssemblyName System.Web.Extensions
     $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
@@ -121,14 +199,16 @@ function Write-ClaudeSettings {
 }
 
 function Install-CursorHook {
-    param([string]$TargetHome)
+    param([string]$TargetHome, [string]$Model)
     $cursor = Join-Path $TargetHome ".cursor"
     $hookDir = Join-Path $cursor "hooks"
     $templateDir = Join-Path $cursor "templates\.claude"
     New-Item -ItemType Directory -Force -Path $hookDir | Out-Null
     New-Item -ItemType Directory -Force -Path $templateDir | Out-Null
     Copy-Item -LiteralPath (Join-Path $ScriptDir "hooks\ensure-claude-setup.ps1") -Destination (Join-Path $hookDir "ensure-claude-setup.ps1") -Force
-    Copy-Item -LiteralPath (Join-Path $ScriptDir "templates\.claude\settings.json") -Destination (Join-Path $templateDir "settings.json") -Force
+    Add-Type -AssemblyName System.Web.Extensions
+    $templateSerializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+    [System.IO.File]::WriteAllText((Join-Path $templateDir "settings.json"), $templateSerializer.Serialize(@{ model = $Model }) + "`n")
 
     $command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./hooks/ensure-claude-setup.ps1"
     $hooksPath = Join-Path $cursor "hooks.json"
@@ -231,7 +311,7 @@ function Rename-ProjectFolder {
     }
     & git -C $NewPath remote remove origin 2>$null
     Write-Host "Renamed the project folder to $NewPath"
-    Write-Host "The setup-repo git remote was removed so this project does not push back to it."
+    Write-Host "The Project Mummy git remote was removed so this project does not push back to it."
     return $NewPath
 }
 
@@ -260,13 +340,15 @@ function Install-ClaudeCode {
 }
 
 $projectPath = Read-ProjectName
-$key = Read-OllamaKey -TargetHome $TargetHomePath
-Write-ClaudeSettings -TargetHome $TargetHomePath -Key $key
-Install-CursorHook -TargetHome $TargetHomePath
+$service = Read-Service
+$key = Read-ServiceKey -TargetHome $TargetHomePath -Service $service
+Write-ClaudeSettings -TargetHome $TargetHomePath -Key $key -Service $service
+Install-CursorHook -TargetHome $TargetHomePath -Model $service.Model
 Install-ClaudeCode
 $projectPath = Rename-ProjectFolder -NewPath $projectPath
 Write-Host ""
-Write-Host "Ready. Claude Code uses glm-5.3 through Ollama Cloud."
+Write-Host "Ready. Project Mummy wrapped this project."
+Write-Host ("Claude Code uses {0} at {1}." -f $service.Model, $service.BaseUrl)
 Write-Host "Settings: $(Join-Path $TargetHomePath '.claude\settings.json')"
 Write-Host "Project folder: $projectPath"
 Write-Host "Open a new terminal in that folder, then run: claude"

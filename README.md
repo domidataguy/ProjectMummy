@@ -1,28 +1,87 @@
-# Claude Code + Ollama setup
+<p align="center">
+  <img src="https://img.shields.io/badge/Project-Mummy-1a1a1a?style=for-the-badge" alt="Project Mummy">
+  <img src="https://img.shields.io/badge/Claude%20Code-wrapped-c4a574?style=for-the-badge" alt="Claude Code wrapped">
+  <img src="https://img.shields.io/badge/Claude%20account-not%20required-2f6f4e?style=for-the-badge" alt="Claude account not required">
+</p>
 
-Clone this repo when starting a project, then run one command. The script first asks for a local repo name and renames this folder to that name. It then asks for an Ollama API key, saves it on that PC, installs or updates Claude Code, and copies the Cursor hook.
+<h1 align="center">Project Mummy</h1>
 
-The key is not stored in this repo. Do not paste it into chat.
+<p align="center">
+  <strong>A new project, wrapped and ready.</strong><br>
+  Clone once. Name it. Point Claude Code at an API you can actually use.
+</p>
 
-## Windows
+---
+
+Project Mummy is the first commit of a new piece of work. It installs or updates [Claude Code](https://code.claude.com), asks which API service you have, and saves that key on your computer. It then renames the folder to the project name you chose.
+
+No Claude account. No key in git. The linen stays here. The project walks out with its own name.
+
+## Unwrap
+
+**Windows**
 
 ```powershell
-git clone https://github.com/domidataguy/claude-ollama-setup.git
-cd claude-ollama-setup
+git clone https://github.com/domidataguy/project-mummy.git
+cd project-mummy
 powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
 ```
 
-## Mac or Linux
+**Mac or Linux**
 
 ```bash
-git clone https://github.com/domidataguy/claude-ollama-setup.git
-cd claude-ollama-setup
+git clone https://github.com/domidataguy/project-mummy.git
+cd project-mummy
 chmod +x setup.sh hooks/ensure-claude-setup.sh
 ./setup.sh
 ```
 
-Press Enter to keep a key that is already saved on that computer. Otherwise paste a key from https://ollama.com/settings/keys. The input stays hidden.
+The script asks four things, in this order:
 
-Claude Code is installed only when it is missing. When it is already installed, `claude update` runs and installs a new version only if one is available.
+1. **Local repo name.** The folder `project-mummy` is renamed to that name.
+2. **API service.** Ollama Cloud, OpenRouter, or another Anthropic-compatible URL.
+3. **API key.** Typed blind. Checked before it is saved. Press Enter only when a key for that same service is already on this computer.
+4. **Claude Code.** Installed when it is missing. Updated when a newer build exists.
 
-The main model is `glm-5.3`. Background calls use `glm-5.3-flash`.
+Open a new terminal in the renamed folder, then run `claude`.
+
+## The cloth it weaves
+
+| | |
+|---|---|
+| Project folder | Renamed to the name you typed |
+| Claude Code settings | `%USERPROFILE%\.claude\settings.json` on Windows, `~/.claude/settings.json` on Mac and Linux |
+| Cursor hook | Copies a model pin into each new project's `.claude` folder |
+| Git remote | The link back to Project Mummy is removed, so the new project cannot be pushed here by accident |
+| Main model | The model you picked. Ollama Cloud starts on `glm-5.3`, with `glm-5.3-flash` for small background calls |
+
+## Services
+
+Claude Code speaks the Anthropic Messages API. Project Mummy points it at a service that speaks that same API. You bring a key from that service. You do not log in with a Claude account.
+
+| Choice | What you need | Where it sends Claude Code |
+|---|---|---|
+| **1. Ollama Cloud** | An [Ollama key](https://ollama.com/settings/keys) | `https://ollama.com` with `glm-5.3` |
+| **2. OpenRouter** | An [OpenRouter key](https://openrouter.ai/settings/keys) and a model id | `https://openrouter.ai/api` |
+| **3. Other** | A base URL and a model id from any service that speaks the Anthropic Messages API | The URL you type |
+
+Press Enter on the OpenRouter model question to use `openrouter/auto`. For choice 3, the URL has to start with `https://`. If that service does not answer a simple key check, type `yes` to save the key anyway.
+
+A plain OpenAI-style chat URL is not enough on its own. Claude Code will not speak that protocol until something in front of it translates to the Anthropic Messages API.
+
+## What never leaves the tomb
+
+- The API key is written only into your user profile.
+- It is not committed, not printed in full, and not copied into the project folder.
+- Do not paste a key into chat, an issue, or a pull request.
+- This repository does not contain a key.
+
+## After the wrap
+
+```text
+claude
+```
+
+Inside Claude Code, `/status` shows the base URL. If it still names a Claude account, quit and open a new terminal so the new settings load.
+
+Cursor, on the same computer, gets a small hook. The next folder you open receives a `.claude/settings.json` that pins the model. The key stays in your user profile.
