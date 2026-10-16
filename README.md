@@ -7,7 +7,7 @@ The key is not stored in this repo. Do not paste it into chat.
 ## Windows
 
 ```powershell
-git clone <this repo>
+git clone https://github.com/domidataguy/claude-ollama-setup.git
 cd claude-ollama-setup
 powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
 ```
@@ -15,7 +15,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
 ## Mac or Linux
 
 ```bash
-git clone <this repo>
+git clone https://github.com/domidataguy/claude-ollama-setup.git
 cd claude-ollama-setup
 chmod +x setup.sh hooks/ensure-claude-setup.sh
 ./setup.sh
