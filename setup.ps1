@@ -71,8 +71,8 @@ function Read-Service {
     Write-Host ""
     Write-Host "API service"
     Write-Host "Claude Code will use this key. A Claude account is not required."
-    Write-Host "  1  Ollama Cloud     glm-5.3, no Claude account"
-    Write-Host "  2  OpenRouter       your model, OpenRouter credits"
+    Write-Host "  1  Ollama Cloud     a short test picks the model"
+    Write-Host "  2  OpenRouter       a short test picks the model"
     Write-Host "  3  Other            any service that speaks the Anthropic Messages API"
     while ($true) {
         $choice = (Read-Host "Choose 1, 2, or 3").Trim()
@@ -88,13 +88,11 @@ function Read-Service {
             }
         }
         if ($choice -eq "2") {
-            $model = (Read-Host "OpenRouter model id (Enter for openrouter/auto)").Trim()
-            if (-not $model) { $model = "openrouter/auto" }
             return @{
                 Name = "OpenRouter"
                 BaseUrl = "https://openrouter.ai/api"
-                Model = $model
-                FastModel = $model
+                Model = ""
+                FastModel = ""
                 KeyUrl = "https://openrouter.ai/settings/keys"
                 CheckUrl = "https://openrouter.ai/api/v1/key"
                 Discover = $true
@@ -106,18 +104,11 @@ function Read-Service {
                 Write-Host "The base URL has to start with https://"
                 continue
             }
-            $model = (Read-Host "Model id").Trim()
-            if (-not $model) {
-                Write-Host "A model id is required."
-                continue
-            }
-            $fast = (Read-Host "Smaller model for background calls (Enter to reuse $model)").Trim()
-            if (-not $fast) { $fast = $model }
             return @{
                 Name = "Custom"
                 BaseUrl = $base
-                Model = $model
-                FastModel = $fast
+                Model = ""
+                FastModel = ""
                 KeyUrl = ""
                 CheckUrl = $base
                 Discover = $false
@@ -166,6 +157,183 @@ function Read-ServiceKey {
         }
         Write-Host "That key was rejected. Paste it again."
     }
+}
+
+$script:RankedModels = @("glm-5.3", "kimi-k2.7-code", "minimax-m3", "glm-5.3-flash")
+
+function Get-MessagesUrl {
+    param([string]$BaseUrl)
+    $base = $BaseUrl.TrimEnd("/")
+    if ($base.EndsWith("/v1")) { return "$base/messages" }
+    return "$base/v1/messages"
+}
+
+function Read-AuthorizedJson {
+    param([string]$Url, [string]$Key, [string]$Method = "GET", [string]$Body = $null)
+    $request = [System.Net.HttpWebRequest]::Create($Url)
+    $request.Method = $Method
+    $request.Timeout = 45000
+    $request.Accept = "application/json"
+    $request.Headers.Add("Authorization", "Bearer $Key")
+    $request.Headers.Add("anthropic-version", "2023-06-01")
+    if ($Body) {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
+        $request.ContentType = "application/json"
+        $request.ContentLength = $bytes.Length
+        $stream = $request.GetRequestStream()
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Close()
+    }
+    try {
+        $response = $request.GetResponse()
+        $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+        $text = $reader.ReadToEnd()
+        $reader.Close()
+        $response.Close()
+        return $text
+    } catch [System.Net.WebException] {
+        return $null
+    }
+}
+
+function Get-CatalogNames {
+    param([string]$Url, [string]$Key)
+    $text = Read-AuthorizedJson -Url $Url -Key $Key
+    if (-not $text) { return @() }
+    try {
+        $data = $text | ConvertFrom-Json
+    } catch {
+        return @()
+    }
+    $names = @()
+    foreach ($item in @($data.models)) {
+        if ($item.name) { $names += [string]$item.name }
+        elseif ($item.model) { $names += [string]$item.model }
+        elseif ($item.id) { $names += [string]$item.id }
+    }
+    foreach ($item in @($data.data)) {
+        if ($item.id) { $names += [string]$item.id }
+        elseif ($item.name) { $names += [string]$item.name }
+    }
+    return @($names | Where-Object { $_ } | Select-Object -Unique)
+}
+
+function Get-ModelCatalog {
+    param($Service, [string]$Key)
+    $urls = @()
+    if ($Service.Name -eq "Ollama Cloud") {
+        $urls += "https://ollama.com/api/tags"
+    } elseif ($Service.Name -eq "OpenRouter") {
+        $urls += "https://openrouter.ai/api/v1/models"
+    } else {
+        $base = $Service.BaseUrl.TrimEnd("/")
+        $urls += "$base/api/tags"
+        $urls += "$base/v1/models"
+    }
+    foreach ($url in $urls) {
+        $names = @(Get-CatalogNames -Url $url -Key $Key)
+        if ($names.Count -gt 0) { return $names }
+    }
+    return @()
+}
+
+function Get-ProbeCandidates {
+    param([string[]]$Catalog, [string]$Fallback)
+    $picked = New-Object System.Collections.Generic.List[string]
+    foreach ($want in $script:RankedModels) {
+        foreach ($name in $Catalog) {
+            if ($name -eq $want -or $name.EndsWith("/$want")) {
+                if (-not $picked.Contains($name)) { $picked.Add($name) }
+                break
+            }
+        }
+        if ($picked.Count -ge 4) { break }
+    }
+    if ($picked.Count -eq 0 -and $Fallback -and $Fallback -ne "openrouter/auto") {
+        $picked.Add($Fallback)
+    }
+    return @($picked)
+}
+
+function Test-ModelTool {
+    param([string]$Url, [string]$Key, [string]$Model)
+    Add-Type -AssemblyName System.Web.Extensions
+    $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+    $body = $serializer.Serialize(@{
+        model = $Model
+        max_tokens = 512
+        tools = @(@{
+            name = "ping"
+            description = "Return ok"
+            input_schema = @{
+                type = "object"
+                properties = @{ value = @{ type = "string" } }
+                required = @("value")
+            }
+        })
+        messages = @(@{ role = "user"; content = "Call the ping tool with value ok." })
+    })
+    $text = Read-AuthorizedJson -Url $Url -Key $Key -Method "POST" -Body $body
+    if (-not $text) { return $false }
+    try {
+        $data = $text | ConvertFrom-Json
+    } catch {
+        return $false
+    }
+    foreach ($block in @($data.content)) {
+        if ([string]$block.type -eq "tool_use" -and [string]$block.name -eq "ping") { return $true }
+    }
+    return $false
+}
+
+function Select-BestModel {
+    param($Service, [string]$Key)
+    Write-Host ""
+    Write-Host "Quick model test"
+    Write-Host "Up to 4 short tool-call requests. Each one stops at 512 tokens."
+    $catalog = @(Get-ModelCatalog -Service $Service -Key $Key)
+    $candidates = @(Get-ProbeCandidates -Catalog $catalog -Fallback $Service.Model)
+    if ($candidates.Count -eq 0) {
+        $typed = (Read-Host "No model list came back. Type one model id to test").Trim()
+        if ($typed) { $candidates = @($typed) }
+    }
+    $passed = @()
+    $messagesUrl = Get-MessagesUrl $Service.BaseUrl
+    foreach ($model in $candidates) {
+        Write-Host ("Trying {0}..." -f $model)
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $ok = Test-ModelTool -Url $messagesUrl -Key $Key -Model $model
+        $watch.Stop()
+        if ($ok) {
+            Write-Host ("  tool call ok ({0:n1}s)" -f $watch.Elapsed.TotalSeconds)
+            $passed += $model
+        } else {
+            Write-Host "  no tool call"
+        }
+    }
+    $best = $null
+    foreach ($want in $script:RankedModels) {
+        foreach ($name in $passed) {
+            if ($name -eq $want -or $name.EndsWith("/$want")) { $best = $name; break }
+        }
+        if ($best) { break }
+    }
+    if (-not $best -and $passed.Count -gt 0) { $best = $passed[0] }
+    if (-not $best) {
+        if ($candidates.Count -gt 0 -and -not $Service.Model) { $Service.Model = $candidates[0] }
+        if (-not $Service.FastModel) { $Service.FastModel = $Service.Model }
+        Write-Host ("No model passed the tool-call test. Keeping {0}." -f $Service.Model)
+        return $Service
+    }
+    $fast = $best
+    foreach ($name in $passed) {
+        if ($name -match "flash") { $fast = $name; break }
+    }
+    $Service.Model = $best
+    $Service.FastModel = $fast
+    Write-Host "Best model: $best"
+    Write-Host "Background model: $fast"
+    return $Service
 }
 
 function Write-ClaudeSettings {
@@ -342,6 +510,7 @@ function Install-ClaudeCode {
 $projectPath = Read-ProjectName
 $service = Read-Service
 $key = Read-ServiceKey -TargetHome $TargetHomePath -Service $service
+$service = Select-BestModel -Service $service -Key $key
 Write-ClaudeSettings -TargetHome $TargetHomePath -Key $key -Service $service
 Install-CursorHook -TargetHome $TargetHomePath -Model $service.Model
 Install-ClaudeCode

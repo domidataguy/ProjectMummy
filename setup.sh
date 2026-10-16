@@ -199,9 +199,9 @@ prompt_service() {
   echo "" >&2
   echo "API service" >&2
   echo "Claude Code will use this key. A Claude account is not required." >&2
-  echo "  1  Ollama Cloud     glm-5.3, no Claude account" >&2
-  echo "  2  OpenRouter       your model, OpenRouter credits" >&2
-  echo "  3  Other            any service that speaks the Anthropic Messages API" >&2
+  echo "  1  Ollama Cloud     a short test picks the model" >&2
+    echo "  2  OpenRouter       a short test picks the model" >&2
+    echo "  3  Other            any service that speaks the Anthropic Messages API" >&2
   while true; do
     echo "Choose 1, 2, or 3:" >&2
     IFS= read -r choice || true
@@ -211,11 +211,7 @@ prompt_service() {
       return
     fi
     if [ "$choice" = "2" ]; then
-      echo "OpenRouter model id (Enter for openrouter/auto):" >&2
-      IFS= read -r model || true
-      model=$(printf '%s' "$model" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-      if [ -z "$model" ]; then model="openrouter/auto"; fi
-      printf '%s\n' "OpenRouter" "https://openrouter.ai/api" "$model" "$model" "https://openrouter.ai/settings/keys" "https://openrouter.ai/api/v1/key" "1"
+      printf '%s\n' "OpenRouter" "https://openrouter.ai/api" "" "" "https://openrouter.ai/settings/keys" "https://openrouter.ai/api/v1/key" "1"
       return
     fi
     if [ "$choice" = "3" ]; then
@@ -226,15 +222,7 @@ prompt_service() {
         https://*) ;;
         *) echo "The base URL has to start with https://" >&2; continue ;;
       esac
-      echo "Model id:" >&2
-      IFS= read -r model || true
-      model=$(printf '%s' "$model" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-      if [ -z "$model" ]; then echo "A model id is required." >&2; continue; fi
-      echo "Smaller model for background calls (Enter to reuse $model):" >&2
-      IFS= read -r fast || true
-      fast=$(printf '%s' "$fast" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-      if [ -z "$fast" ]; then fast="$model"; fi
-      printf '%s\n' "Custom" "$base" "$model" "$fast" "" "$base" "0"
+      printf '%s\n' "Custom" "$base" "" "" "" "$base" "0"
       return
     fi
     echo "Type 1, 2, or 3." >&2
@@ -315,6 +303,147 @@ print(str((data.get("env") or {}).get("ANTHROPIC_BASE_URL") or ""))
   done
 }
 
+pick_best_model() {
+  MUMMY_BASE="$1" MUMMY_NAME="$2" MUMMY_FALLBACK="$3" OLLAMA_KEY_CHECK="$4" python3 -c '
+import json, os, sys, time, urllib.request
+base = os.environ["MUMMY_BASE"].rstrip("/")
+name = os.environ["MUMMY_NAME"]
+fallback = os.environ.get("MUMMY_FALLBACK") or ""
+key = os.environ.get("OLLAMA_KEY_CHECK") or ""
+ranked = ["glm-5.3", "kimi-k2.7-code", "minimax-m3", "glm-5.3-flash"]
+
+def fetch(url, method="GET", body=None):
+    data = body.encode("utf-8") if body else None
+    req = urllib.request.Request(url, data=data, method=method, headers={
+        "Authorization": "Bearer " + key,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            return resp.read().decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+def names_from(url):
+    raw = fetch(url)
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    found = []
+    for item in data.get("models") or []:
+        if isinstance(item, dict):
+            found.append(str(item.get("name") or item.get("model") or item.get("id") or ""))
+    for item in data.get("data") or []:
+        if isinstance(item, dict):
+            found.append(str(item.get("id") or item.get("name") or ""))
+    return [item for item in found if item]
+
+if name == "Ollama Cloud":
+    urls = ["https://ollama.com/api/tags"]
+elif name == "OpenRouter":
+    urls = ["https://openrouter.ai/api/v1/models"]
+else:
+    urls = [base + "/api/tags", base + "/v1/models"]
+catalog = []
+for url in urls:
+    catalog = names_from(url)
+    if catalog:
+        break
+picked = []
+for want in ranked:
+    for item in catalog:
+        if item == want or item.endswith("/" + want):
+            if item not in picked:
+                picked.append(item)
+            break
+    if len(picked) >= 4:
+        break
+if not picked and fallback and fallback != "openrouter/auto":
+    picked = [fallback]
+if not picked:
+    print("NEED")
+    print(fallback)
+    raise SystemExit(0)
+
+def messages_url():
+    if base.endswith("/v1"):
+        return base + "/messages"
+    return base + "/v1/messages"
+
+def tool_ok(model):
+    body = json.dumps({
+        "model": model,
+        "max_tokens": 512,
+        "tools": [{
+            "name": "ping",
+            "description": "Return ok",
+            "input_schema": {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+            },
+        }],
+        "messages": [{"role": "user", "content": "Call the ping tool with value ok."}],
+    })
+    raw = fetch(messages_url(), "POST", body)
+    if not raw:
+        return False
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return False
+    for block in data.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "ping":
+            return True
+    return False
+
+print("Quick model test", file=sys.stderr)
+print("Up to 4 short tool-call requests. Each one stops at 512 tokens.", file=sys.stderr)
+passed = []
+for model in picked:
+    print("Trying " + model + "...", file=sys.stderr)
+    started = time.time()
+    ok = tool_ok(model)
+    elapsed = time.time() - started
+    if ok:
+        print("  tool call ok ({0:.1f}s)".format(elapsed), file=sys.stderr)
+        passed.append(model)
+    else:
+        print("  no tool call", file=sys.stderr)
+best = ""
+for want in ranked:
+    for model in passed:
+        if model == want or model.endswith("/" + want):
+            best = model
+            break
+    if best:
+        break
+if not best and passed:
+    best = passed[0]
+if not best:
+    keep = fallback or (picked[0] if picked else "")
+    print("No model passed the tool-call test. Keeping " + keep + ".", file=sys.stderr)
+    print(keep)
+    print(keep)
+    raise SystemExit(0)
+fast = best
+for model in passed:
+    if "flash" in model:
+        fast = model
+        break
+print("Best model: " + best, file=sys.stderr)
+print("Background model: " + fast, file=sys.stderr)
+print(best)
+print(fast)
+'
+  unset OLLAMA_KEY_CHECK
+}
+
 PROJECT_PATH=$(prompt_project_name)
 SERVICE_LINES=$(prompt_service)
 SERVICE_NAME=$(printf '%s\n' "$SERVICE_LINES" | sed -n '1p')
@@ -325,6 +454,16 @@ SERVICE_KEY_URL=$(printf '%s\n' "$SERVICE_LINES" | sed -n '5p')
 SERVICE_CHECK=$(printf '%s\n' "$SERVICE_LINES" | sed -n '6p')
 SERVICE_DISCOVER=$(printf '%s\n' "$SERVICE_LINES" | sed -n '7p')
 KEY=$(prompt_service_key "$SERVICE_NAME" "$SERVICE_BASE" "$SERVICE_KEY_URL" "$SERVICE_CHECK")
+PICKED=$(pick_best_model "$SERVICE_BASE" "$SERVICE_NAME" "$SERVICE_MODEL" "$KEY")
+if [ "$(printf '%s\n' "$PICKED" | sed -n '1p')" = "NEED" ]; then
+  echo "No model list came back. Type one model id to test:" >&2
+  IFS= read -r SERVICE_MODEL || true
+  SERVICE_MODEL=$(printf '%s' "$SERVICE_MODEL" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  PICKED=$(pick_best_model "$SERVICE_BASE" "$SERVICE_NAME" "$SERVICE_MODEL" "$KEY")
+fi
+SERVICE_MODEL=$(printf '%s\n' "$PICKED" | sed -n '1p')
+SERVICE_FAST=$(printf '%s\n' "$PICKED" | sed -n '2p')
+if [ -z "$SERVICE_FAST" ]; then SERVICE_FAST="$SERVICE_MODEL"; fi
 write_settings "$KEY" "$SERVICE_BASE" "$SERVICE_MODEL" "$SERVICE_FAST" "$SERVICE_DISCOVER"
 unset KEY
 install_hook "$SERVICE_MODEL"
