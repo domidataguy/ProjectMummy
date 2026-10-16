@@ -86,3 +86,7 @@ claude
 Inside Claude Code, `/status` shows the base URL. If it still names a Claude account, quit and open a new terminal so the new settings load.
 
 Cursor, on the same computer, gets a small hook. The next folder you open receives a `.claude/settings.json` that pins the model. The key stays in your user profile.
+
+## Author
+
+Originally written by Dominic Yu (dominic@data-science-hk.org). Contact that address if you need help.
