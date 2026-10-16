@@ -360,12 +360,11 @@ print(str((data.get("env") or {}).get("ANTHROPIC_BASE_URL") or ""))
 
 pick_best_model() {
   MUMMY_BASE="$1" MUMMY_NAME="$2" MUMMY_FALLBACK="$3" OLLAMA_KEY_CHECK="$4" python3 -c '
-import json, os, sys, time, urllib.request
+import json, os, re, sys, time, urllib.request
 base = os.environ["MUMMY_BASE"].rstrip("/")
 name = os.environ["MUMMY_NAME"]
 fallback = os.environ.get("MUMMY_FALLBACK") or ""
 key = os.environ.get("OLLAMA_KEY_CHECK") or ""
-ranked = ["glm-5.3", "kimi-k2.7-code", "minimax-m3", "glm-5.3-flash"]
 
 def fetch(url, method="GET", body=None):
     data = body.encode("utf-8") if body else None
@@ -381,49 +380,144 @@ def fetch(url, method="GET", body=None):
     except Exception:
         return ""
 
-def names_from(url):
-    raw = fetch(url)
-    if not raw:
-        return []
-    try:
-        data = json.loads(raw)
-    except Exception:
-        return []
-    found = []
-    for item in data.get("models") or []:
-        if isinstance(item, dict):
-            found.append(str(item.get("name") or item.get("model") or item.get("id") or ""))
-    for item in data.get("data") or []:
-        if isinstance(item, dict):
-            found.append(str(item.get("id") or item.get("name") or ""))
-    return [item for item in found if item]
+def parse_params(raw):
+    text = str(raw or "").strip()
+    sci = re.fullmatch(r"[0-9]*\.?[0-9]+[eE][+-]?[0-9]+", text)
+    if sci:
+        return float(text)
+    match = re.fullmatch(r"([0-9]*\.?[0-9]+)\s*([KkMmGgTt])?", text)
+    if not match:
+        return 0.0
+    count = float(match.group(1))
+    suffix = (match.group(2) or "").upper()
+    return count * {"K": 1e3, "M": 1e6, "G": 1e9, "T": 1e12}.get(suffix, 1.0)
 
-if name == "Ollama Cloud":
-    urls = ["https://ollama.com/api/tags"]
-elif name == "OpenRouter":
-    urls = ["https://openrouter.ai/api/v1/models"]
-else:
-    urls = [base + "/api/tags", base + "/v1/models"]
-catalog = []
-for url in urls:
-    catalog = names_from(url)
-    if catalog:
-        break
-picked = []
-for want in ranked:
-    for item in catalog:
-        if item == want or item.endswith("/" + want):
-            if item not in picked:
-                picked.append(item)
-            break
-    if len(picked) >= 4:
-        break
-if not picked and fallback and fallback != "openrouter/auto":
-    picked = [fallback]
-if not picked:
-    print("NEED")
-    print(fallback)
-    raise SystemExit(0)
+def skipped(model):
+    if model.startswith("~"):
+        return True
+    if re.search(r"embed|rerank|whisper|\btts\b|\bclip\b|guard|moderation", model, re.I):
+        return True
+    if re.search(r"(:batch|:free|:extended|:online)$", model, re.I):
+        return True
+    return False
+
+def fast_name(model):
+    return re.search(r"(?:^|[/:._-])(?:flashx?|highspeed|haiku)(?:[/:._-]|$)", model, re.I) is not None
+
+def context_of(info):
+    best = 0.0
+    if not isinstance(info, dict):
+        return best
+    for key, value in info.items():
+        if str(key).endswith("context_length"):
+            try:
+                best = max(best, float(value))
+            except Exception:
+                pass
+    return best
+
+def entry(model, params, context, tools, created, price):
+    return {"name": model, "params": params, "context": context, "tools": tools, "created": created, "price": price}
+
+def show_entry(show_url, model, size_bytes):
+    raw = fetch(show_url, "POST", json.dumps({"model": model}))
+    params = float(size_bytes or 0)
+    context = 0.0
+    tools = None
+    if raw:
+        try:
+            shown = json.loads(raw)
+            counted = parse_params((shown.get("details") or {}).get("parameter_size"))
+            if counted > 0:
+                params = counted
+            context = context_of(shown.get("model_info"))
+            caps = shown.get("capabilities")
+            if isinstance(caps, list):
+                tools = "tools" in caps
+        except Exception:
+            tools = None
+    return entry(model, params, context, tools, 0.0, 0.0)
+
+def catalog_entries():
+    if name == "OpenRouter":
+        raw = fetch("https://openrouter.ai/api/v1/models")
+        try:
+            data = json.loads(raw) if raw else {}
+        except Exception:
+            data = {}
+        found = []
+        for item in data.get("data") or []:
+            if not isinstance(item, dict):
+                continue
+            model = str(item.get("id") or item.get("name") or "")
+            if not model:
+                continue
+            caps = item.get("supported_parameters")
+            tools = ("tools" in caps) if isinstance(caps, list) else None
+            leaf = model.split("/")[-1]
+            found.append(entry(model, parse_params(leaf), float(item.get("context_length") or 0), tools, float(item.get("created") or 0), float((item.get("pricing") or {}).get("prompt") or 0)))
+        return found
+    tags_url = "https://ollama.com/api/tags"
+    show_url = "https://ollama.com/api/show"
+    if name != "Ollama Cloud":
+        tags_url = base + "/api/tags"
+        show_url = base + "/api/show"
+    raw = fetch(tags_url)
+    models = []
+    if raw:
+        try:
+            models = json.loads(raw).get("models") or []
+        except Exception:
+            models = []
+    if not models:
+        other = fetch(base + "/v1/models")
+        found = []
+        if other:
+            try:
+                payload = json.loads(other)
+            except Exception:
+                payload = {}
+            for item in (payload.get("data") or payload.get("models") or []):
+                if isinstance(item, dict):
+                    model = str(item.get("id") or item.get("name") or "")
+                    if model:
+                        found.append(entry(model, 0.0, float(item.get("context_length") or 0), None, 0.0, 0.0))
+        return found
+    print("Reading the live catalog...", file=sys.stderr)
+    found = []
+    for item in models[:40]:
+        if not isinstance(item, dict):
+            continue
+        model = str(item.get("name") or item.get("model") or "")
+        if not model:
+            continue
+        found.append(show_entry(show_url, model, item.get("size") or 0))
+    return found
+
+def probe_plan(entries):
+    usable = [item for item in entries if item["name"] and not skipped(item["name"]) and item["tools"] is not False]
+    mains = [item for item in usable if not fast_name(item["name"])]
+    mains.sort(key=lambda item: item["name"])
+    mains.sort(key=lambda item: (item["params"], item["context"], item["created"]), reverse=True)
+    background = [item for item in usable if fast_name(item["name"])]
+    background.sort(key=lambda item: item["name"])
+    background.sort(key=lambda item: item["params"] if item["params"] > 0 else (item["price"] if item["price"] > 0 else 10**30))
+    return {
+        "main": [item["name"] for item in mains[:3]],
+        "background": background[0]["name"] if background else "",
+    }
+
+entries = catalog_entries()
+plan = probe_plan(entries)
+mains = plan["main"]
+background = plan["background"]
+if not mains and not background:
+    if fallback and fallback != "openrouter/auto":
+        mains = [fallback]
+    else:
+        print("NEED")
+        print(fallback)
+        raise SystemExit(0)
 
 def messages_url():
     if base.endswith("/v1"):
@@ -458,39 +552,42 @@ def tool_ok(model):
     return False
 
 print("Quick model test", file=sys.stderr)
+print("Candidates come from the live catalog, ranked by parameter count.", file=sys.stderr)
 print("Up to 4 short tool-call requests. Each one stops at 512 tokens.", file=sys.stderr)
-passed = []
-for model in picked:
+if mains:
+    print("Largest tool models: " + ", ".join(mains), file=sys.stderr)
+if background:
+    print("Background candidate: " + background, file=sys.stderr)
+
+def probe(model):
     print("Trying " + model + "...", file=sys.stderr)
     started = time.time()
     ok = tool_ok(model)
     elapsed = time.time() - started
     if ok:
         print("  tool call ok ({0:.1f}s)".format(elapsed), file=sys.stderr)
-        passed.append(model)
     else:
         print("  no tool call", file=sys.stderr)
+    return ok
+
 best = ""
-for want in ranked:
-    for model in passed:
-        if model == want or model.endswith("/" + want):
-            best = model
-            break
-    if best:
+for model in mains:
+    if probe(model):
+        best = model
         break
-if not best and passed:
-    best = passed[0]
+fast = ""
+if background and background != best and probe(background):
+    fast = background
 if not best:
-    keep = fallback or (picked[0] if picked else "")
+    best = fast
+if not best:
+    keep = fallback or (mains[0] if mains else "")
     print("No model passed the tool-call test. Keeping " + keep + ".", file=sys.stderr)
     print(keep)
     print(keep)
     raise SystemExit(0)
-fast = best
-for model in passed:
-    if "flash" in model:
-        fast = model
-        break
+if not fast:
+    fast = best
 print("Best model: " + best, file=sys.stderr)
 print("Background model: " + fast, file=sys.stderr)
 print(best)

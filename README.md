@@ -54,7 +54,7 @@ Then run `claude` in the renamed folder. On Windows that works in the same windo
 | Claude Code settings | `%USERPROFILE%\.claude\settings.json` on Windows, `~/.claude/settings.json` on Mac and Linux |
 | Cursor hook | Copies a model pin into each new project's `.claude` folder |
 | Git remote | The link back to Project Mummy is removed, so the new project cannot be pushed here by accident |
-| Main model | Chosen by the tool-call test. Preference is `glm-5.3`, then `kimi-k2.7-code`, then `minimax-m3`, then `glm-5.3-flash` |
+| Main model | Chosen from the live catalog. Tool-capable models are ranked by parameter count. The largest one that calls the tool wins. |
 
 ## Services
 
@@ -66,7 +66,7 @@ Claude Code speaks the Anthropic Messages API. Project Mummy points it at a serv
 | **2. OpenRouter** | An [OpenRouter key](https://openrouter.ai/settings/keys) | `https://openrouter.ai/api` |
 | **3. Other** | A base URL from any service that speaks the Anthropic Messages API | The URL you type |
 
-The test lists models on that endpoint, then tries at most four: `glm-5.3`, `kimi-k2.7-code`, `minimax-m3`, and `glm-5.3-flash`, when the key can see them. Each try asks the model to call one tiny tool and stops at 512 tokens. The highest one that succeeds is saved. If a `flash` model also succeeds, it is used for background calls. If the list is empty, the script asks for one model id and tests that. For choice 3, the URL has to start with `https://`. If that service does not answer a simple key check, type `yes` to save the key anyway.
+The test reads whatever models that key can see. It does not keep a fixed list of names. Embeddings, rerankers, and batch or free variants are skipped. Models that advertise tool calls are ranked by parameter count from the provider (`/api/show` on Ollama, the model list on OpenRouter). The largest three are tried first, and the test stops when one calls the tool. One smaller model whose name marks it as flash is tried for background calls. Each try stops at 512 tokens. If the list is empty, the script asks for one model id and tests that. For choice 3, the URL has to start with `https://`. If that service does not answer a simple key check, type `yes` to save the key anyway.
 
 A plain OpenAI-style chat URL is not enough on its own. Claude Code will not speak that protocol until something in front of it translates to the Anthropic Messages API.
 

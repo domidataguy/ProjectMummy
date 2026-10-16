@@ -159,8 +159,6 @@ function Read-ServiceKey {
     }
 }
 
-$script:RankedModels = @("glm-5.3", "kimi-k2.7-code", "minimax-m3", "glm-5.3-flash")
-
 function Get-MessagesUrl {
     param([string]$BaseUrl)
     $base = $BaseUrl.TrimEnd("/")
@@ -237,22 +235,154 @@ function Get-ModelCatalog {
     return @()
 }
 
-function Get-ProbeCandidates {
-    param([string[]]$Catalog, [string]$Fallback)
-    $picked = New-Object System.Collections.Generic.List[string]
-    foreach ($want in $script:RankedModels) {
-        foreach ($name in $Catalog) {
-            if ($name -eq $want -or $name.EndsWith("/$want")) {
-                if (-not $picked.Contains($name)) { $picked.Add($name) }
-                break
-            }
+function Convert-ToParameterCount {
+    param($Raw)
+    if ($null -eq $Raw -or [string]$Raw -eq "") { return [double]0 }
+    $text = ([string]$Raw).Trim()
+    if ($text -match '^[0-9]*\.?[0-9]+[eE][+-]?[0-9]+$') { return [double]$text }
+    if ($text -notmatch '^([0-9]*\.?[0-9]+)\s*([KkMmGgTt])?$') { return [double]0 }
+    $count = [double]$Matches[1]
+    if ($Matches[2]) {
+        switch ($Matches[2].ToUpperInvariant()) {
+            "K" { $count = $count * 1e3 }
+            "M" { $count = $count * 1e6 }
+            "G" { $count = $count * 1e9 }
+            "T" { $count = $count * 1e12 }
         }
-        if ($picked.Count -ge 4) { break }
     }
-    if ($picked.Count -eq 0 -and $Fallback -and $Fallback -ne "openrouter/auto") {
-        $picked.Add($Fallback)
+    return $count
+}
+
+function Get-ContextLength {
+    param($ModelInfo)
+    $best = [double]0
+    if (-not $ModelInfo) { return $best }
+    foreach ($prop in @($ModelInfo.PSObject.Properties)) {
+        if ($prop.Name -match 'context_length$' -and [double]$prop.Value -gt $best) {
+            $best = [double]$prop.Value
+        }
     }
-    return @($picked)
+    return $best
+}
+
+function Test-SkippedModelName {
+    param([string]$Name)
+    if ($Name -match '(?i)embed|rerank|whisper|\btts\b|\bclip\b|guard|moderation') { return $true }
+    if ($Name -match '(?i)(:batch|:free|:extended|:online)$') { return $true }
+    if ($Name.StartsWith("~")) { return $true }
+    return $false
+}
+
+function Test-FastModelName {
+    param([string]$Name)
+    return $Name -match '(?i)(?:^|[/:._-])(?:flashx?|highspeed|haiku)(?:[/:._-]|$)'
+}
+
+function New-ModelEntry {
+    param([string]$Name, [double]$Params, [double]$Context, $Tools, [double]$Created, [double]$PromptPrice)
+    return [pscustomobject]@{
+        Name = $Name
+        Params = $Params
+        Context = $Context
+        Tools = $Tools
+        Created = $Created
+        PromptPrice = $PromptPrice
+    }
+}
+
+function Get-ShowEntry {
+    param([string]$ShowUrl, [string]$Key, [string]$Name, [double]$SizeBytes)
+    $safe = $Name.Replace('\', '\\').Replace('"', '\"')
+    $text = Read-AuthorizedJson -Url $ShowUrl -Key $Key -Method "POST" -Body ('{"model":"' + $safe + '"}')
+    $params = $SizeBytes
+    $context = [double]0
+    $tools = $null
+    if ($text) {
+        try {
+            $shown = $text | ConvertFrom-Json
+            $counted = [double]0
+            if ($shown.details) { $counted = Convert-ToParameterCount $shown.details.parameter_size }
+            if ($counted -gt 0) { $params = $counted }
+            $context = Get-ContextLength $shown.model_info
+            if ($shown.capabilities) {
+                $tools = @($shown.capabilities) -contains "tools"
+            }
+        } catch {
+            $tools = $null
+        }
+    }
+    return New-ModelEntry -Name $Name -Params $params -Context $context -Tools $tools -Created 0 -PromptPrice 0
+}
+
+function Get-CatalogEntries {
+    param($Service, [string]$Key)
+    $entries = New-Object System.Collections.Generic.List[object]
+    if ($Service.Name -eq "OpenRouter") {
+        $text = Read-AuthorizedJson -Url "https://openrouter.ai/api/v1/models" -Key $Key
+        if (-not $text) { return @() }
+        try { $data = $text | ConvertFrom-Json } catch { return @() }
+        foreach ($item in @($data.data)) {
+            $id = [string]($item.id)
+            if (-not $id) { $id = [string]$item.name }
+            if (-not $id) { continue }
+            $tools = $null
+            if ($item.supported_parameters) { $tools = @($item.supported_parameters) -contains "tools" }
+            $created = [double]0
+            if ($item.created) { $created = [double]$item.created }
+            $price = [double]0
+            if ($item.pricing -and $item.pricing.prompt) { $price = [double]$item.pricing.prompt }
+            $context = [double]0
+            if ($item.context_length) { $context = [double]$item.context_length }
+            $params = Convert-ToParameterCount (($id -split '/')[-1])
+            $entries.Add((New-ModelEntry -Name $id -Params $params -Context $context -Tools $tools -Created $created -PromptPrice $price))
+        }
+        return @($entries.ToArray())
+    }
+    $tagsUrl = "https://ollama.com/api/tags"
+    $showUrl = "https://ollama.com/api/show"
+    if ($Service.Name -ne "Ollama Cloud") {
+        $base = $Service.BaseUrl.TrimEnd("/")
+        $tagsUrl = "$base/api/tags"
+        $showUrl = "$base/api/show"
+    }
+    $text = Read-AuthorizedJson -Url $tagsUrl -Key $Key
+    $models = @()
+    if ($text) {
+        try { $models = @((($text | ConvertFrom-Json).models)) } catch { $models = @() }
+    }
+    if ($models.Count -eq 0 -or -not $models[0]) {
+        $names = @(Get-ModelCatalog -Service $Service -Key $Key)
+        foreach ($id in $names) {
+            $entries.Add((New-ModelEntry -Name $id -Params 0 -Context 0 -Tools $null -Created 0 -PromptPrice 0))
+        }
+        return @($entries.ToArray())
+    }
+    Write-Host "Reading the live catalog..."
+    $shown = 0
+    foreach ($item in $models) {
+        if ($shown -ge 40) { break }
+        $id = [string]$item.name
+        if (-not $id) { $id = [string]$item.model }
+        if (-not $id) { continue }
+        $size = [double]0
+        if ($item.size) { $size = [double]$item.size }
+        $entries.Add((Get-ShowEntry -ShowUrl $showUrl -Key $Key -Name $id -SizeBytes $size))
+        $shown += 1
+    }
+    return @($entries.ToArray())
+}
+
+function Get-ProbePlan {
+    param($Entries)
+    $usable = @($Entries | Where-Object { $_ -and -not (Test-SkippedModelName $_.Name) -and $_.Tools -ne $false })
+    $main = @($usable | Where-Object { -not (Test-FastModelName $_.Name) } | Sort-Object @{ Expression = "Params"; Descending = $true }, @{ Expression = "Context"; Descending = $true }, @{ Expression = "Created"; Descending = $true }, Name | Select-Object -First 3)
+    $background = @($usable | Where-Object { Test-FastModelName $_.Name } | Sort-Object @{ Expression = { if ($_.Params -gt 0) { $_.Params } elseif ($_.PromptPrice -gt 0) { $_.PromptPrice } else { [double]::MaxValue } } }, Name | Select-Object -First 1)
+    $backgroundName = $null
+    if ($background.Count -gt 0) { $backgroundName = [string]$background[0].Name }
+    return [pscustomobject]@{
+        Main = @($main | ForEach-Object { $_.Name })
+        Background = $backgroundName
+    }
 }
 
 function Test-ModelTool {
@@ -286,49 +416,61 @@ function Test-ModelTool {
     return $false
 }
 
+function Invoke-ToolProbe {
+    param([string]$Url, [string]$Key, [string]$Model)
+    Write-Host ("Trying {0}..." -f $Model)
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $ok = Test-ModelTool -Url $Url -Key $Key -Model $Model
+    $watch.Stop()
+    if ($ok) {
+        Write-Host ("  tool call ok ({0:n1}s)" -f $watch.Elapsed.TotalSeconds)
+    } else {
+        Write-Host "  no tool call"
+    }
+    return $ok
+}
+
 function Select-BestModel {
     param($Service, [string]$Key)
     Write-Host ""
     Write-Host "Quick model test"
+    Write-Host "Candidates come from the live catalog, ranked by parameter count."
     Write-Host "Up to 4 short tool-call requests. Each one stops at 512 tokens."
-    $catalog = @(Get-ModelCatalog -Service $Service -Key $Key)
-    $candidates = @(Get-ProbeCandidates -Catalog $catalog -Fallback $Service.Model)
-    if ($candidates.Count -eq 0) {
+    $entries = @(Get-CatalogEntries -Service $Service -Key $Key)
+    $plan = Get-ProbePlan -Entries $entries
+    $mains = @($plan.Main | Where-Object { $_ })
+    if ($mains.Count -eq 0 -and -not $plan.Background) {
         $typed = (Read-Host "No model list came back. Type one model id to test").Trim()
-        if ($typed) { $candidates = @($typed) }
+        if ($typed) { $mains = @($typed) }
     }
-    $passed = @()
+    if ($mains.Count -gt 0) {
+        Write-Host ("Largest tool models: {0}" -f ($mains -join ", "))
+    }
+    if ($plan.Background) {
+        Write-Host ("Background candidate: {0}" -f $plan.Background)
+    }
     $messagesUrl = Get-MessagesUrl $Service.BaseUrl
-    foreach ($model in $candidates) {
-        Write-Host ("Trying {0}..." -f $model)
-        $watch = [System.Diagnostics.Stopwatch]::StartNew()
-        $ok = Test-ModelTool -Url $messagesUrl -Key $Key -Model $model
-        $watch.Stop()
-        if ($ok) {
-            Write-Host ("  tool call ok ({0:n1}s)" -f $watch.Elapsed.TotalSeconds)
-            $passed += $model
-        } else {
-            Write-Host "  no tool call"
-        }
-    }
     $best = $null
-    foreach ($want in $script:RankedModels) {
-        foreach ($name in $passed) {
-            if ($name -eq $want -or $name.EndsWith("/$want")) { $best = $name; break }
+    foreach ($model in $mains) {
+        if (Invoke-ToolProbe -Url $messagesUrl -Key $Key -Model $model) {
+            $best = $model
+            break
         }
-        if ($best) { break }
     }
-    if (-not $best -and $passed.Count -gt 0) { $best = $passed[0] }
+    $fast = $null
+    if ($plan.Background -and $plan.Background -ne $best) {
+        if (Invoke-ToolProbe -Url $messagesUrl -Key $Key -Model $plan.Background) {
+            $fast = $plan.Background
+        }
+    }
+    if (-not $best) { $best = $fast }
     if (-not $best) {
-        if ($candidates.Count -gt 0 -and -not $Service.Model) { $Service.Model = $candidates[0] }
+        if ($mains.Count -gt 0 -and -not $Service.Model) { $Service.Model = $mains[0] }
         if (-not $Service.FastModel) { $Service.FastModel = $Service.Model }
         Write-Host ("No model passed the tool-call test. Keeping {0}." -f $Service.Model)
         return $Service
     }
-    $fast = $best
-    foreach ($name in $passed) {
-        if ($name -match "flash") { $fast = $name; break }
-    }
+    if (-not $fast) { $fast = $best }
     $Service.Model = $best
     $Service.FastModel = $fast
     Write-Host "Best model: $best"
