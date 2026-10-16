@@ -22,23 +22,23 @@ No Claude account. No key in git. The linen stays here. The project walks out wi
 **Windows**
 
 ```powershell
-git clone https://github.com/domidataguy/project-mummy.git
-cd project-mummy
+git clone https://github.com/domidataguy/ProjectMummy.git
+cd ProjectMummy
 powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
 ```
 
 **Mac or Linux**
 
 ```bash
-git clone https://github.com/domidataguy/project-mummy.git
-cd project-mummy
+git clone https://github.com/domidataguy/ProjectMummy.git
+cd ProjectMummy
 chmod +x setup.sh hooks/ensure-claude-setup.sh
 ./setup.sh
 ```
 
 The script asks four things, in this order:
 
-1. **Local repo name.** The folder `project-mummy` is renamed to that name.
+1. **Local repo name.** The folder `ProjectMummy` is renamed to that name.
 2. **API service.** Ollama Cloud, OpenRouter, or another Anthropic-compatible URL.
 3. **API key.** Typed blind. Checked before it is saved. Press Enter only when a key for that same service is already on this computer.
 4. **Claude Code.** Installed when it is missing. Updated when a newer build exists.
