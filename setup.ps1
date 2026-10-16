@@ -469,9 +469,31 @@ function Rename-ProjectFolder {
         Write-Host "Refusing to rename this folder. Claude Code setup is still in place at $ScriptDir"
         return $ScriptDir
     }
+    $previous = Get-Location
+    Set-Location -LiteralPath $parent
+    $renamed = $false
     try {
         [System.IO.Directory]::Move($ScriptDir, $NewPath)
+        $renamed = $true
     } catch {
+        New-Item -ItemType Directory -Path $NewPath | Out-Null
+        Get-ChildItem -LiteralPath $ScriptDir -Force | ForEach-Object {
+            try {
+                Move-Item -LiteralPath $_.FullName -Destination $NewPath -ErrorAction Stop
+            } catch {
+                Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $NewPath $_.Name) -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+        $renamed = Test-Path -LiteralPath (Join-Path $NewPath ".git")
+        if ($renamed) {
+            Remove-Item -LiteralPath $ScriptDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    } finally {
+        if (Test-Path -LiteralPath $previous.Path) {
+            Set-Location -LiteralPath $previous.Path
+        }
+    }
+    if (-not $renamed) {
         Write-Host "Claude Code is ready. The folder is in use, so it was not renamed."
         Write-Host "Close programs using it, then run:"
         Write-Host ("Rename-Item -LiteralPath '{0}' -NewName '{1}'" -f $ScriptDir, (Split-Path -Leaf $NewPath))

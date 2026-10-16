@@ -165,8 +165,16 @@ rename_project_folder() {
       return
       ;;
   esac
-  if mv "$SCRIPT_DIR" "$new_path"; then
+  (
+    cd "$(dirname "$SCRIPT_DIR")" || exit 1
+    mv "$SCRIPT_DIR" "$new_path" 2>/dev/null || {
+      mkdir -p "$new_path"
+      find "$SCRIPT_DIR" -mindepth 1 -maxdepth 1 -exec mv {} "$new_path"/ \; 2>/dev/null || true
+    }
+  )
+  if [ -d "$new_path/.git" ]; then
     git -C "$new_path" remote remove origin >/dev/null 2>&1 || true
+    rmdir "$SCRIPT_DIR" >/dev/null 2>&1 || true
     echo "Renamed the project folder to $new_path" >&2
     echo "The Project Mummy git remote was removed so this project does not push back to it." >&2
     printf '%s' "$new_path"
