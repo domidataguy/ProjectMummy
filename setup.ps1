@@ -168,6 +168,73 @@ function Install-CursorHook {
     [System.IO.File]::WriteAllText($hooksPath, $serializer.Serialize($config) + "`n")
 }
 
+function Test-ProjectName {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    if ($Name.Length -gt 80) { return $false }
+    if ($Name -match '[\\/:*?"<>|]') { return $false }
+    if ($Name.EndsWith('.') -or $Name.EndsWith(' ')) { return $false }
+    if ($Name -eq '.' -or $Name -eq '..') { return $false }
+    $reserved = @(
+        'CON','PRN','AUX','NUL',
+        'COM1','COM2','COM3','COM4','COM5','COM6','COM7','COM8','COM9',
+        'LPT1','LPT2','LPT3','LPT4','LPT5','LPT6','LPT7','LPT8','LPT9'
+    )
+    $base = ($Name -split '\.')[0].ToUpper()
+    if ($reserved -contains $base) { return $false }
+    return $true
+}
+
+function Read-ProjectName {
+    $current = Split-Path -Leaf $ScriptDir
+    $parent = Split-Path -Parent $ScriptDir
+    Write-Host ""
+    Write-Host "New project"
+    Write-Host "The setup folder will be renamed. It is currently:"
+    Write-Host "  $ScriptDir"
+    while ($true) {
+        $name = (Read-Host "Local repo name").Trim()
+        if (-not (Test-ProjectName $name)) {
+            Write-Host "Use one folder name: letters, numbers, dot, dash, and underscore. No slashes."
+            continue
+        }
+        if ($name -eq $current) { return $ScriptDir }
+        $dest = Join-Path $parent $name
+        if (Test-Path -LiteralPath $dest) {
+            Write-Host "That folder already exists: $dest"
+            continue
+        }
+        return $dest
+    }
+}
+
+function Rename-ProjectFolder {
+    param([string]$NewPath)
+    if ($NewPath -eq $ScriptDir) {
+        Write-Host "Folder name unchanged: $ScriptDir"
+        return $ScriptDir
+    }
+    $parent = Split-Path -Parent $ScriptDir
+    $scriptFull = [System.IO.Path]::GetFullPath($ScriptDir).TrimEnd('\')
+    $homeFull = [System.IO.Path]::GetFullPath($TargetHomePath).TrimEnd('\')
+    if ([string]::IsNullOrWhiteSpace($parent) -or $scriptFull -eq $homeFull) {
+        Write-Host "Refusing to rename this folder. Claude Code setup is still in place at $ScriptDir"
+        return $ScriptDir
+    }
+    try {
+        [System.IO.Directory]::Move($ScriptDir, $NewPath)
+    } catch {
+        Write-Host "Claude Code is ready. The folder is in use, so it was not renamed."
+        Write-Host "Close programs using it, then run:"
+        Write-Host ("Rename-Item -LiteralPath '{0}' -NewName '{1}'" -f $ScriptDir, (Split-Path -Leaf $NewPath))
+        return $ScriptDir
+    }
+    & git -C $NewPath remote remove origin 2>$null
+    Write-Host "Renamed the project folder to $NewPath"
+    Write-Host "The setup-repo git remote was removed so this project does not push back to it."
+    return $NewPath
+}
+
 function Install-ClaudeCode {
     $exe = $null
     $cmd = Get-Command claude -ErrorAction SilentlyContinue
@@ -192,11 +259,14 @@ function Install-ClaudeCode {
     }
 }
 
+$projectPath = Read-ProjectName
 $key = Read-OllamaKey -TargetHome $TargetHomePath
 Write-ClaudeSettings -TargetHome $TargetHomePath -Key $key
 Install-CursorHook -TargetHome $TargetHomePath
 Install-ClaudeCode
+$projectPath = Rename-ProjectFolder -NewPath $projectPath
 Write-Host ""
 Write-Host "Ready. Claude Code uses glm-5.3 through Ollama Cloud."
 Write-Host "Settings: $(Join-Path $TargetHomePath '.claude\settings.json')"
-Write-Host "Open a new terminal, then run: claude"
+Write-Host "Project folder: $projectPath"
+Write-Host "Open a new terminal in that folder, then run: claude"

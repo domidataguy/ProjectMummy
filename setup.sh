@@ -156,6 +156,81 @@ path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 '
 }
 
+valid_project_name() {
+  HOME_PATH="$1" python3 -c '
+import os, sys
+name = os.environ["HOME_PATH"]
+reserved = {
+    "CON","PRN","AUX","NUL",
+    "COM1","COM2","COM3","COM4","COM5","COM6","COM7","COM8","COM9",
+    "LPT1","LPT2","LPT3","LPT4","LPT5","LPT6","LPT7","LPT8","LPT9",
+}
+if not name or len(name) > 80 or name in {".", ".."} or name.endswith(".") or name.endswith(" "):
+    raise SystemExit(1)
+if any(ch in name for ch in "\\/:*?\"<>|"):
+    raise SystemExit(1)
+if name.split(".", 1)[0].upper() in reserved:
+    raise SystemExit(1)
+'
+}
+
+prompt_project_name() {
+  local current parent name dest
+  current=$(basename "$SCRIPT_DIR")
+  parent=$(dirname "$SCRIPT_DIR")
+  echo "" >&2
+  echo "New project" >&2
+  echo "The setup folder will be renamed. It is currently:" >&2
+  echo "  $SCRIPT_DIR" >&2
+  while true; do
+    echo "Local repo name:" >&2
+    IFS= read -r name || true
+    name=$(printf '%s' "$name" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if ! valid_project_name "$name"; then
+      echo "Use one folder name: letters, numbers, dot, dash, and underscore. No slashes." >&2
+      continue
+    fi
+    if [ "$name" = "$current" ]; then
+      printf '%s' "$SCRIPT_DIR"
+      return
+    fi
+    dest="$parent/$name"
+    if [ -e "$dest" ]; then
+      echo "That folder already exists: $dest" >&2
+      continue
+    fi
+    printf '%s' "$dest"
+    return
+  done
+}
+
+rename_project_folder() {
+  local new_path="$1"
+  if [ "$new_path" = "$SCRIPT_DIR" ]; then
+    echo "Folder name unchanged: $SCRIPT_DIR" >&2
+    printf '%s' "$SCRIPT_DIR"
+    return
+  fi
+  case "$SCRIPT_DIR" in
+    "/"|"/Users"|"/home"|"$HOME_PATH")
+      echo "Refusing to rename this folder. Claude Code setup is still in place at $SCRIPT_DIR" >&2
+      printf '%s' "$SCRIPT_DIR"
+      return
+      ;;
+  esac
+  if mv "$SCRIPT_DIR" "$new_path"; then
+    git -C "$new_path" remote remove origin >/dev/null 2>&1 || true
+    echo "Renamed the project folder to $new_path" >&2
+    echo "The setup-repo git remote was removed so this project does not push back to it." >&2
+    printf '%s' "$new_path"
+    return
+  fi
+  echo "Claude Code is ready. The folder is in use, so it was not renamed." >&2
+  echo "Close programs using it, then run:" >&2
+  echo "mv $(printf '%q' "$SCRIPT_DIR") $(printf '%q' "$new_path")" >&2
+  printf '%s' "$SCRIPT_DIR"
+}
+
 install_claude() {
   if command -v claude >/dev/null 2>&1; then
     echo "Checking Claude Code for updates..."
@@ -172,12 +247,15 @@ install_claude() {
   echo "Claude Code installed. Open a new terminal so claude is on PATH."
 }
 
+PROJECT_PATH=$(prompt_project_name)
 KEY=$(prompt_key)
 write_settings "$KEY"
 unset KEY
 install_hook
 install_claude
+PROJECT_PATH=$(rename_project_folder "$PROJECT_PATH")
 echo ""
 echo "Ready. Claude Code uses glm-5.3 through Ollama Cloud."
 echo "Settings: $HOME_PATH/.claude/settings.json"
-echo "Open a new terminal, then run: claude"
+echo "Project folder: $PROJECT_PATH"
+echo "Open a new terminal in that folder, then run: claude"

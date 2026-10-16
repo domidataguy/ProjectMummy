@@ -1,6 +1,6 @@
 # Claude Code + Ollama setup
 
-Clone this repo on a PC, then run one command. The script asks for an Ollama API key in the terminal, checks it, saves it on that PC, installs or updates Claude Code, and copies the Cursor hook.
+Clone this repo when starting a project, then run one command. The script first asks for a local repo name and renames this folder to that name. It then asks for an Ollama API key, saves it on that PC, installs or updates Claude Code, and copies the Cursor hook.
 
 The key is not stored in this repo. Do not paste it into chat.
 
