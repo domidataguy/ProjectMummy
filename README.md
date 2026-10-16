@@ -44,7 +44,7 @@ The script asks four things, in this order:
 4. **Model test.** A short tool-call on at most four models. The one that calls the tool, highest on the coding list, becomes the model. A passing `flash` model handles background calls.
 5. **Claude Code.** Installed when it is missing. Updated when a newer build exists.
 
-Open a new terminal in the renamed folder, then run `claude`.
+Then run `claude` in the renamed folder. On Windows that works in the same window. On Mac or Linux, open a new terminal if this one was started before Claude Code was installed.
 
 ## The cloth it weaves
 

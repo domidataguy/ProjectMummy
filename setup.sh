@@ -186,20 +186,67 @@ rename_project_folder() {
   printf '%s' "$SCRIPT_DIR"
 }
 
+find_claude_exe() {
+  hit=$(command -v claude 2>/dev/null || true)
+  if [ -n "$hit" ] && [ -f "$hit" ] && ! grep -q "Project Mummy Claude Code shim" "$hit" 2>/dev/null; then
+    printf '%s\n' "$hit"
+    return 0
+  fi
+  for candidate in "$HOME/.local/bin/claude" /opt/homebrew/bin/claude /usr/local/bin/claude; do
+    if [ -x "$candidate" ] && ! grep -q "Project Mummy Claude Code shim" "$candidate" 2>/dev/null; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 0
+}
+
+publish_claude_shim() {
+  local exe=$1 dir oldifs
+  [ -n "$exe" ] && [ -x "$exe" ] || return 1
+  oldifs=$IFS
+  IFS=:
+  for dir in $PATH; do
+    case "$dir" in
+      "$HOME"|"$HOME"/*|/usr/local/bin)
+        [ -d "$dir" ] && [ -w "$dir" ] || continue
+        if [ -e "$dir/claude" ] && ! grep -q "Project Mummy Claude Code shim" "$dir/claude" 2>/dev/null; then
+          continue
+        fi
+        printf '#!/bin/sh\n# Project Mummy Claude Code shim\nexec %s "$@"\n' "$exe" > "$dir/claude"
+        chmod +x "$dir/claude"
+        IFS=$oldifs
+        return 0
+        ;;
+    esac
+  done
+  IFS=$oldifs
+  return 1
+}
+
 install_claude() {
-  if command -v claude >/dev/null 2>&1; then
-    echo "Checking Claude Code for updates..."
-    claude update || echo "claude update did not install a new version. The installed copy is still in place."
-    return
-  fi
-  echo "Installing Claude Code..."
-  uname_s=$(uname -s)
-  if [ "$uname_s" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
-    brew install --cask claude-code
+  CLAUDE_SAME_WINDOW=0
+  exe=$(find_claude_exe | sed -n '1p')
+  if [ -z "$exe" ]; then
+    echo "Installing Claude Code..."
+    uname_s=$(uname -s)
+    if [ "$uname_s" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
+      brew install --cask claude-code
+    else
+      curl -fsSL https://claude.ai/install.sh | bash
+    fi
+    exe=$(find_claude_exe | sed -n '1p')
+    if [ -z "$exe" ]; then
+      echo "Claude Code install finished, but the claude program was not found." >&2
+      return
+    fi
   else
-    curl -fsSL https://claude.ai/install.sh | bash
+    echo "Checking Claude Code for updates..."
+    "$exe" update || echo "The installed copy is still in place."
   fi
-  echo "Claude Code installed. Open a new terminal so claude is on PATH."
+  if publish_claude_shim "$exe"; then
+    CLAUDE_SAME_WINDOW=1
+  fi
 }
 
 prompt_service() {
@@ -482,4 +529,10 @@ echo "Ready. Project Mummy wrapped this project."
 echo "Claude Code uses $SERVICE_MODEL at $SERVICE_BASE."
 echo "Settings: $HOME_PATH/.claude/settings.json"
 echo "Project folder: $PROJECT_PATH"
-echo "Open a new terminal in that folder, then run: claude"
+if [ "$CLAUDE_SAME_WINDOW" = "1" ]; then
+  echo "In this window, run:"
+  printf "cd %q\n" "$PROJECT_PATH"
+  echo "claude"
+else
+  echo "Open a new terminal in that folder, then run: claude"
+fi

@@ -505,28 +505,101 @@ function Rename-ProjectFolder {
     return $NewPath
 }
 
-function Install-ClaudeCode {
-    $exe = $null
-    $cmd = Get-Command claude -ErrorAction SilentlyContinue
-    if ($cmd) { $exe = $cmd.Source }
-    if (-not $exe) {
-        $found = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages") -Filter claude.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($found) { $exe = $found.FullName }
+function Find-ClaudeExe {
+    foreach ($cmd in @(Get-Command claude -All -ErrorAction SilentlyContinue)) {
+        if ($cmd.Source -like "*.exe") { return $cmd.Source }
     }
+    $root = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"
+    if (Test-Path -LiteralPath $root) {
+        $found = Get-ChildItem -Path $root -Filter claude.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($found) { return $found.FullName }
+    }
+    return $null
+}
+
+function Add-ClaudeDirToUserPath {
+    param([string]$ExePath)
+    $dir = Split-Path -Parent $ExePath
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $parts = @()
+    if ($userPath) {
+        $parts = @($userPath -split ';' | Where-Object { $_ -and ($_ -notmatch 'Anthropic\.ClaudeCode_') })
+    }
+    $seen = @{}
+    $unique = @()
+    foreach ($part in @($dir) + $parts) {
+        $key = $part.TrimEnd('\').ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $unique += $part
+    }
+    $merged = $unique -join ';'
+    if ($merged -ne $userPath) {
+        [Environment]::SetEnvironmentVariable("Path", $merged, "User")
+    }
+}
+
+function Install-ClaudeCommandShim {
+    param([string]$ExePath)
+    $shimDir = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps"
+    $shim = Join-Path $shimDir "claude.cmd"
+    if (-not (Test-Path -LiteralPath $shimDir)) { return $false }
+    $marker = "Project Mummy Claude Code shim"
+    if (Test-Path -LiteralPath $shim) {
+        $existing = Get-Content -LiteralPath $shim -Raw -ErrorAction SilentlyContinue
+        if ($existing -and ($existing -notmatch [regex]::Escape($marker))) { return $false }
+    }
+    $full = [System.IO.Path]::GetFullPath($ExePath)
+    $body = "@echo off`r`nrem $marker`r`n`"$full`" %*`r`n"
+    try {
+        Set-Content -LiteralPath $shim -Value $body -Encoding ASCII -ErrorAction Stop
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Update-ClaudeCode {
+    param([string]$ExePath)
+    Write-Host "Checking Claude Code for updates..."
+    if ($ExePath -like "*\WinGet\Packages\*") {
+        $output = & winget upgrade --id Anthropic.ClaudeCode -e --disable-interactivity --accept-package-agreements --accept-source-agreements 2>&1 | Out-String
+        $code = $LASTEXITCODE
+        $current = $output -match "No available upgrade" -or $output -match "No applicable upgrade" -or $code -eq -1978335189 -or $code -eq 2316632107
+        if ($current) {
+            Write-Host "Claude Code is already current."
+            return
+        }
+        if ($code -eq 0) {
+            Write-Host "Claude Code updated."
+            return
+        }
+        Write-Host "Claude Code update check finished. The installed copy is still in place."
+        return
+    }
+    & $ExePath update
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "The installed copy is still in place."
+    }
+}
+
+function Install-ClaudeCode {
+    $exe = Find-ClaudeExe
     if (-not $exe) {
         Write-Host "Installing Claude Code..."
         & winget install --id Anthropic.ClaudeCode -e --disable-interactivity --accept-package-agreements --accept-source-agreements
         if ($LASTEXITCODE -ne 0) {
             throw "Claude Code install failed (winget exit $LASTEXITCODE)."
         }
-        Write-Host "Claude Code installed. Open a new terminal so claude is on PATH."
-        return
+        $exe = Find-ClaudeExe
+        if (-not $exe) { throw "Claude Code installed, but claude.exe was not found." }
+    } else {
+        Update-ClaudeCode -ExePath $exe
+        $again = Find-ClaudeExe
+        if ($again) { $exe = $again }
     }
-    Write-Host "Checking Claude Code for updates..."
-    & $exe update
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "claude update exited $LASTEXITCODE. The installed copy is still in place."
-    }
+    Add-ClaudeDirToUserPath -ExePath $exe
+    $script:ClaudeSameWindow = Install-ClaudeCommandShim -ExePath $exe
 }
 
 $projectPath = Read-ProjectName
@@ -542,4 +615,10 @@ Write-Host "Ready. Project Mummy wrapped this project."
 Write-Host ("Claude Code uses {0} at {1}." -f $service.Model, $service.BaseUrl)
 Write-Host "Settings: $(Join-Path $TargetHomePath '.claude\settings.json')"
 Write-Host "Project folder: $projectPath"
-Write-Host "Open a new terminal in that folder, then run: claude"
+if ($script:ClaudeSameWindow) {
+    Write-Host "In this window, run:"
+    Write-Host ("cd '{0}'" -f $projectPath)
+    Write-Host "claude"
+} else {
+    Write-Host "Open a new terminal in that folder, then run: claude"
+}
